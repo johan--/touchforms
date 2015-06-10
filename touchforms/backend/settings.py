@@ -1,6 +1,6 @@
 import logging.handlers
 import sys
-
+import os
 # TODO how to harmonize this with django settings?
 
 # allow cross-origin requests to touchforms daemon. if false, all access to
@@ -12,6 +12,8 @@ ALLOW_CROSS_ORIGIN = False
 PERSIST_SESSIONS = True
 PERSISTENCE_DIRECTORY = None  # defaults to /tmp
 EXTENSION_MODULES = []  # you can allow extensions by overriding this
+
+SQLITE_JDBC_JAR = "%s/jrlib/sqlite-jdbc-3.8.10.1.jar"%os.path.dirname(os.path.abspath(__file__))
 
 # be more forgiving about data types in api
 HACKS_MODE = True

@@ -7,6 +7,7 @@ from copy import copy
 
 import settings
 
+from java.lang import Throwable
 from org.javarosa.core.model.instance import InstanceInitializationFactory
 from org.javarosa.core.services.storage import IStorageUtilityIndexed
 from org.javarosa.core.services.storage import IStorageIterator
@@ -15,7 +16,7 @@ from org.commcare.cases.ledger.instance import LedgerInstanceTreeElement
 from org.commcare.cases.model import Case
 from org.commcare.cases.ledger import Ledger
 from org.commcare.util import CommCareSession
-from org.commcare.xml import TreeElementParser
+from org.javarosa.xml import TreeElementParser
 
 from org.javarosa.xpath.expr import XPathFuncExpr
 from org.javarosa.xpath import XPathParseTool, XPathException
@@ -27,6 +28,7 @@ from org.kxml2.io import KXmlParser
 
 from util import to_vect, to_jdate, to_hashtable, to_input_stream, query_factory
 from xcp import TouchFormsUnauthorized, TouchcareInvalidXPath
+from persistence import sqlite_get_connection
 
 logger = logging.getLogger('formplayer.touchcare')
 
@@ -35,16 +37,19 @@ def query_case_ids(q, criteria=None):
     criteria = copy(criteria) or {} # don't modify the passed in dict
     criteria["ids_only"] = 'true'
     query_url = '%s?%s' % (settings.CASE_API_URL, urllib.urlencode(criteria))
+    print "QueryQ:, ", query_url
     return [id for id in q(query_url)]
 
 
 def query_cases(q, criteria=None):
+    print "QueryQ 2:, ", q
     query_url = '%s?%s' % (settings.CASE_API_URL, urllib.urlencode(criteria)) \
                     if criteria else settings.CASE_API_URL
     return [case_from_json(cj) for cj in q(query_url)]
 
 
 def query_case(q, case_id):
+    print "QueryQ 3:, ", q
     cases = query_cases(q, {'case_id': case_id})
     try:
         return cases[0]
@@ -150,6 +155,7 @@ class TouchformsStorageUtility(IStorageUtilityIndexed):
 
     def read(self, record_id):
         logger.debug('read record %s' % record_id)
+        print "Reading record, ", record_id
         try:
             # record_id is an int, object_id is a guid
             object_id = self.ids[record_id]
@@ -158,6 +164,7 @@ class TouchformsStorageUtility(IStorageUtilityIndexed):
         return self.read_object(object_id)
 
     def read_object(self, object_id):
+        print "Reading object, ", object_id
         logger.debug('read object %s' % object_id)
         if object_id not in self._objects:
             self.put_object(self.fetch_object(object_id))
@@ -179,7 +186,26 @@ class TouchformsStorageUtility(IStorageUtilityIndexed):
 
 class CaseDatabase(TouchformsStorageUtility):
 
+    # for now only do this for cases
+    def __init__(self, host, domain, auth, additional_filters=None, preload=False, form_context=None, user_id=None):
+        print "init CaseDatabase"
+
+        self.user_id = user_id
+
+        self.database_name = '%s-casedb.db' % user_id
+        conn = sqlite_get_connection(self.database_name)
+        cursor = conn.cursor()
+
+        cursor.execute("create table %s (name, size);" % 'test')
+        cursor.execute("insert into test values (?,?)", [4,5])
+
+        cursor.close()
+        conn.commit()
+        conn.close()
+        super(CaseDatabase, self).__init__(host, domain, auth, additional_filters=None, preload=False, form_context=None)
+
     def get_object_id(self, case):
+        print "CaseDatabase get_object_id ", case
         return case.getCaseId()
 
     def fetch_object(self, case_id):
@@ -188,6 +214,7 @@ class CaseDatabase(TouchformsStorageUtility):
         return query_case(self.query_func, case_id)
 
     def load_all_objects(self):
+        print "CaseDatabase load_all_objects"
         if self.form_context.get('cases', None):
             cases = map(lambda c: case_from_json(c), self.form_context.get('cases'))
         else:
@@ -203,6 +230,7 @@ class CaseDatabase(TouchformsStorageUtility):
         self.fully_loaded = True
 
     def load_object_ids(self):
+        print "CaseDatabase load_object_ids"
         if self.form_context.get('all_case_ids', None):
             case_ids = self.form_context.get('all_case_ids')
         else:
@@ -211,6 +239,7 @@ class CaseDatabase(TouchformsStorageUtility):
         self.ids = dict(enumerate(sorted(case_ids)))
 
     def getIDsForValue(self, field_name, value):
+        print "CaseDatabase getIdsForValue"
         logger.debug('case index lookup %s %s' % (field_name, value))
 
         if (field_name, value) not in self.cached_lookups:
@@ -278,11 +307,14 @@ class CCInstances(InstanceInitializationFactory):
     def generateRoot(self, instance):
         ref = instance.getReference()
         def from_bundle(inst):
+            print "From Bundle"
             root = inst.getRoot()
             root.setParent(instance.getBase())
             return root
-
+        print "Ref, ", ref
         if 'casedb' in ref:
+            print "Instance, ", instance.getClass()
+            print "Vars" , self.vars
             return CaseInstanceTreeElement(
                 instance.getBase(),
                 CaseDatabase(
@@ -292,6 +324,7 @@ class CCInstances(InstanceInitializationFactory):
                     self.vars.get("additional_filters", {}),
                     self.vars.get("preload_cases", False),
                     self.form_context,
+                    self.vars["user_id"]
                 ),
                 False
             )
@@ -313,8 +346,10 @@ class CCInstances(InstanceInitializationFactory):
             )
 
         elif 'session' in ref:
+            print "SEssion in ref"
             meta_keys = ['device_id', 'app_version', 'username', 'user_id']
             exclude_keys = ['additional_filters', 'user_data']
+            print "Getting session"
             sess = CommCareSession(None) # will not passing a CCPlatform cause problems later?
             for k, v in self.vars.iteritems():
                 if k not in meta_keys and k not in exclude_keys:
@@ -325,12 +360,12 @@ class CCInstances(InstanceInitializationFactory):
             clean_user_data = {}
             for k, v in self.vars.get('user_data', {}).iteritems():
                 clean_user_data[k] = unicode(v if v is not None else '', errors='replace')
-
+            print "From Bundle Get Session"
             return from_bundle(sess.getSessionInstance(*([self.vars.get(k, '') for k in meta_keys] + \
                                                          [to_hashtable(clean_user_data)])))
-    
+
     def _get_fixture(self, user_id, fixture_id):
-        query_url = '%(base)s/%(user)s/%(fixture)s' % { "base": settings.FIXTURE_API_URL, 
+        query_url = '%(base)s/%(user)s/%(fixture)s' % { "base": settings.FIXTURE_API_URL,
                                                         "user": user_id,
                                                         "fixture": fixture_id }
         q = query_factory(self.vars.get('host'), self.vars['domain'], self.auth, format="raw")
@@ -357,6 +392,7 @@ def filter_cases(filter_expr, api_auth, session_data=None, form_context=None):
     caseInstance = ExternalDataInstance("jr://instance/casedb", "casedb")
 
     try:
+        print "initializing casedb..."
         caseInstance.initialize(ccInstances, "casedb")
     except (HTTPError, URLError), e:
         raise TouchFormsUnauthorized('Unable to connect to HQ: %s' % str(e))
@@ -366,10 +402,12 @@ def filter_cases(filter_expr, api_auth, session_data=None, form_context=None):
     # load any additional instances needed
     for extra_instance_config in session_data.get('extra_instances', []):
         data_instance = ExternalDataInstance(extra_instance_config['src'], extra_instance_config['id'])
+        print "initializing data_instance..."
         data_instance.initialize(ccInstances, extra_instance_config['id'])
         instances[extra_instance_config['id']] = data_instance
 
     try:
+        print "case list to string"
         case_list = XPathFuncExpr.toString(
             XPathParseTool.parseXPath(modified_xpath).eval(
                 EvaluationContext(None, instances)))

@@ -6,6 +6,10 @@ from xcp import EmptyCacheFileException
 import settings
 from com.xhaus.jyson import JSONDecodeError
 import com.xhaus.jyson.JysonCodec as json
+from java.lang import Class
+from java.sql  import DriverManager, SQLException
+import classPathHacker
+from com.ziclix.python.sql import zxJDBC
 
 def persist(sess):
     sess_id = sess.uuid
@@ -53,3 +57,36 @@ def cache_path(key):
     if not os.path.exists(persistence_dir):
         os.makedirs(persistence_dir)
     return os.path.join(persistence_dir, 'tfsess-%s' % key)
+
+
+def sqlite_get_connection(database):
+
+    params = {
+        'url': 'jdbc:sqlite:/tmp/%s' % database,
+    }
+
+    try:
+        # try to connect regularly
+
+        print "Trying to get connection.:"
+
+        conn = zxJDBC.connectx("org.sqlite.javax.SQLiteConnectionPoolDataSource", **params)
+
+        print "Connection gotten on first try: " + str(conn)
+
+    except:
+        # else fall back to this workaround (we expect to do this)
+
+        print "Except trying to get connection.:"
+        try:
+            jarloader = classPathHacker.classPathHacker()
+            a = jarloader.addFile(settings.SQLITE_JDBC_JAR)
+            conn = zxJDBC.connectx("org.sqlite.javax.SQLiteConnectionPoolDataSource", **params)
+        except zxJDBC.DatabaseError, msg:
+            print msg
+
+        print "Connection gotten on second try"
+
+    return conn
+
+
