@@ -23,6 +23,7 @@ from org.javarosa.xpath import XPathParseTool, XPathException
 from org.javarosa.xpath.parser import XPathSyntaxException
 from org.javarosa.core.model.condition import EvaluationContext
 from org.javarosa.core.model.instance import ExternalDataInstance
+from org.commcare.api.persistence import UserDatabaseHelper
 
 from org.kxml2.io import KXmlParser
 
@@ -42,14 +43,16 @@ def query_case_ids(q, criteria=None):
 
 
 def query_cases(q, criteria=None):
-    print "QueryQ 2:, ", q
     query_url = '%s?%s' % (settings.CASE_API_URL, urllib.urlencode(criteria)) \
                     if criteria else settings.CASE_API_URL
-    return [case_from_json(cj) for cj in q(query_url)]
+
+    ret = [case_from_json(cj) for cj in q(query_url)]
+    print ret
+    return ret
+
 
 
 def query_case(q, case_id):
-    print "QueryQ 3:, ", q
     cases = query_cases(q, {'case_id': case_id})
     try:
         return cases[0]
@@ -97,21 +100,26 @@ def ledger_from_json(data):
 
 class StaticIterator(IStorageIterator):
     def __init__(self, ids):
+        print "ids: ", ids
+        print "id0: ", ids[0]
         self.ids = ids
         self.i = 0
 
     def hasMore(self):
+        print "Has more"
         return self.i < len(self.ids)
 
     def nextID(self):
         id = self.ids[self.i]
         self.i += 1
+        print "returning next id: ", id
         return id
 
 
 class TouchformsStorageUtility(IStorageUtilityIndexed):
 
     def __init__(self, host, domain, auth, additional_filters=None, preload=False, form_context=None):
+        print "init TouchformsStorageUtility"
         self.cached_lookups = {}
         self.form_context = form_context or {}
 
@@ -124,6 +132,7 @@ class TouchformsStorageUtility(IStorageUtilityIndexed):
         self.fully_loaded = False  # when we've loaded every possible object
         self.query_func = query_factory(host, domain, auth)
         self.additional_filters = additional_filters or {}
+        print "Touchforms preload: ", preload
         if preload:
             self.load_all_objects()
         else:
@@ -143,6 +152,7 @@ class TouchformsStorageUtility(IStorageUtilityIndexed):
 
     @property
     def objects(self):
+        print "Getting objects"
         if self.fully_loaded:
             return self._objects
         else:
@@ -156,11 +166,15 @@ class TouchformsStorageUtility(IStorageUtilityIndexed):
     def read(self, record_id):
         logger.debug('read record %s' % record_id)
         print "Reading record, ", record_id
+        print "ids: ", self.ids
         try:
             # record_id is an int, object_id is a guid
             object_id = self.ids[record_id]
+            print "Returning id, ", object_id
         except KeyError:
+            print "Key error :("
             return None
+        print "returning: ", self.read_object(object_id)
         return self.read_object(object_id)
 
     def read_object(self, object_id):
@@ -178,37 +192,22 @@ class TouchformsStorageUtility(IStorageUtilityIndexed):
         pass
 
     def getNumRecords(self):
+        print "Num Records"
         return len(self.ids)
 
     def iterate(self):
+        print "iterate tc: ", self.ids.keys()
         return StaticIterator(self.ids.keys())
 
 
 class CaseDatabase(TouchformsStorageUtility):
-
-    # for now only do this for cases
-    def __init__(self, host, domain, auth, additional_filters=None, preload=False, form_context=None, user_id=None):
-        print "init CaseDatabase"
-
-        self.user_id = user_id
-
-        self.database_name = '%s-casedb.db' % user_id
-        conn = sqlite_get_connection(self.database_name)
-        cursor = conn.cursor()
-
-        cursor.execute("create table %s (name, size);" % 'test')
-        cursor.execute("insert into test values (?,?)", [4,5])
-
-        cursor.close()
-        conn.commit()
-        conn.close()
-        super(CaseDatabase, self).__init__(host, domain, auth, additional_filters=None, preload=False, form_context=None)
 
     def get_object_id(self, case):
         print "CaseDatabase get_object_id ", case
         return case.getCaseId()
 
     def fetch_object(self, case_id):
+        print "CaseDatabase gfet object ", case_id
         if ('case-id', case_id) in self.cached_lookups:
             return self.cached_lookups[('case-id', case_id)][0]
         return query_case(self.query_func, case_id)
@@ -230,12 +229,13 @@ class CaseDatabase(TouchformsStorageUtility):
         self.fully_loaded = True
 
     def load_object_ids(self):
-        print "CaseDatabase load_object_ids"
+        print "CaseDatabase load_object_ids, all case: ", self.form_context.get('all_case_ids', None)
         if self.form_context.get('all_case_ids', None):
             case_ids = self.form_context.get('all_case_ids')
         else:
             case_ids = query_case_ids(self.query_func, criteria=self.additional_filters)
         # todo: see note above about why sorting is necessary
+        print "CaseDataBase loaded IDs, ", dict(enumerate(sorted(case_ids)))
         self.ids = dict(enumerate(sorted(case_ids)))
 
     def getIDsForValue(self, field_name, value):
@@ -263,6 +263,210 @@ class CaseDatabase(TouchformsStorageUtility):
         cases = self.cached_lookups[(field_name, value)]
         id_map = dict((v, k) for k, v in self.ids.iteritems())
         return to_vect(id_map[c.getCaseId()] for c in cases)
+
+
+class SQLiteCaseDatabase(TouchformsStorageUtility):
+    # for now only do this for cases
+    def __init__(self, host, domain, auth, additional_filters=None, preload=False, form_context=None, user_id=None):
+
+        self.user_id = user_id
+        self.database_name = '%s-casedb.db' % user_id
+
+        conn = sqlite_get_connection(self.database_name)
+        cursor = conn.cursor()
+
+        createcasedbstring = UserDatabaseHelper.createCaseDBString()
+        dropcasedbstring = "DROP TABLE IF EXISTS 'TFCase';"
+        try:
+            cursor.execute(dropcasedbstring)
+            cursor.execute(createcasedbstring)
+        except Exception, e:
+            print "Exception, " , e
+            # do nothing
+
+        cursor.close()
+        conn.commit()
+        conn.close()
+
+        super(SQLiteCaseDatabase, self).__init__(host, domain, auth, additional_filters, preload, form_context)
+        self.restore()
+
+    def restore(self):
+        case_list = json.loads(query_cases(self.query_func, criteria=self.additional_filters))
+        print case_list
+        for c in case_list:
+            print "c, ", c
+            self.insert_case(case_from_json(c))
+
+    def insert_case(self, case):
+
+        self.database_name = '%s-casedb.db' % self.user_id
+        conn = sqlite_get_connection(self.database_name)
+
+        cursor = conn.cursor()
+
+        ins_sql = "INSERT INTO TFCase (case_id, case_type, case_status, commcare_sql_record) " \
+                      "VALUES (?, ?, ?, ?)"
+        ins_params = [case.getCaseId(), case.getMetaData(Case.INDEX_CASE_TYPE),
+                      case.getMetaData(Case.INDEX_CASE_STATUS), case.getProperties().toString()]
+
+        cursor.execute(ins_sql, ins_params)
+        cursor.close()
+        conn.commit()
+        conn.close()
+
+    def row_to_case(self, row):
+        c = Case()
+        #todo this is terrible
+        c.setCaseId(row[1])
+        c.setTypeId(row[2])
+        c.setName(data['properties']['case_name'])
+        c.setClosed(data['closed'])
+        if data['properties']['date_opened']:
+            c.setDateOpened(to_jdate(datetime.strptime(data['properties']['date_opened'], '%Y-%m-%dT%H:%M:%S'))) # 'Z' in fmt string omitted due to jython bug
+        owner_id = data['properties']['owner_id'] or data['user_id'] or ""
+        c.setUserId(owner_id) # according to clayton "there is no user_id, only owner_id"
+
+        for k, v in data['properties'].iteritems():
+            if v is not None and k not in ['case_name', 'case_type', 'date_opened']:
+                c.setProperty(k, v)
+
+        for k, v in data['indices'].iteritems():
+            c.setIndex(k, v['case_type'], v['case_id'])
+
+        for k, v in data['attachments'].iteritems():
+            c.updateAttachment(k, v['url'])
+
+        return c
+
+
+    def get_all_cases(self):
+        print "Getting all cases"
+
+        self.database_name = '%s-casedb.db' % self.user_id
+        conn = sqlite_get_connection(self.database_name)
+
+        cursor = conn.cursor()
+
+        sel_sql = "SELECT * FROM TFCase"
+        cursor.execute(sel_sql)
+
+        cases = []
+
+        for row in cursor:
+            case = self.row_to_case(row)
+            cases.append(case)
+
+        cursor.close()
+        conn.commit()
+        conn.close()
+
+        return cases
+
+    def get_case(self, case_id):
+        print "Getting a case, ", case_id
+        self.database_name = '%s-casedb.db' % self.user_id
+        conn = sqlite_get_connection(self.database_name)
+
+        cursor = conn.cursor()
+
+        sel_sql = "SELECT * FROM TFCase WHERE case_id = ?"
+        sel_params = [case_id]
+        cursor.execute(sel_sql, sel_params)
+
+        row = cursor.fetchone()
+        case = self.row_to_case(row)
+
+        cursor.close()
+        conn.commit()
+        conn.close()
+
+        return case
+
+    def get_object_ids(self):
+
+        print "SQLite get object ids"
+
+        self.database_name = '%s-casedb.db' % self.user_id
+        conn = sqlite_get_connection(self.database_name)
+
+        cursor = conn.cursor()
+
+        ins_sql = "SELECT (commcare_sql_id) FROM TFCase"
+
+        cursor.execute(ins_sql)
+
+        results = []
+
+        for row in cursor.fetchall():
+            #print row
+            results.append(dict(zip(['commcare_sql_id'], row)))
+
+        cursor.close()
+        conn.commit()
+        conn.close()
+
+        return results
+
+    def get_object_id(self, case):
+        print "get object id sqlite case", case
+        return case.getCaseId()
+
+    def load_all_objects(self):
+        print "SQLiteCaseDatabase load_all_objects"
+        if self.form_context.get('cases', None):
+            cases = map(lambda c: case_from_json(c), self.form_context.get('cases'))
+        else:
+            cases = self.get_all_cases()
+
+        for c in cases:
+            self.put_object(c)
+        # todo: the sorted() call is a hack to try and preserve order between bootstrapping
+        # this with IDs versus full values. Really we should store a _next_id integer and then
+        # update things as they go into self._objects inside the put_object() function.
+        # http://manage.dimagi.com/default.asp?169413
+        self.ids = dict(enumerate(sorted(self._objects.keys())))
+        self.fully_loaded = True
+
+    def iterate(self):
+        #raise Throwable("Fail Here")
+        results = self.get_object_ids()
+        ret = ([d['commcare_sql_id'] for d in results])
+        return StaticIterator(ret)
+
+    def read(self, record_id):
+        logger.debug('sqlite read record %s' % record_id)
+        print "sqlite Reading record, ", record_id
+        print "ids: ", self.ids
+        try:
+            self.database_name = '%s-casedb.db' % self.user_id
+            conn = sqlite_get_connection(self.database_name)
+
+            cursor = conn.cursor()
+
+            ins_sql = "SELECT case_id FROM TFCase WHERE commcare_sql_id = ?"
+            ins_params = [record_id]
+
+            cursor.execute(ins_sql, ins_params)
+
+            row = cursor.fetchone()
+
+            print "row, ", row
+
+            object_id = row[0]
+            print "Returning id, ", object_id
+        except KeyError:
+            print "Key error :("
+            return None
+        print "returning: ", self.read_object(object_id)
+        return self.read_object(object_id)
+
+    def fetch_object(self, case_id):
+        print "SQLiteCaseDatabase gfet object ", case_id
+        if ('case-id', case_id) in self.cached_lookups:
+            return self.cached_lookups[('case-id', case_id)][0]
+        return self.get_case(case_id)
+
 
 
 class LedgerDatabase(TouchformsStorageUtility):
@@ -300,6 +504,7 @@ class CCInstances(InstanceInitializationFactory):
 
     def __init__(self, sessionvars, api_auth, form_context=None):
         self.vars = sessionvars
+        print "SelfVars: ", self.vars
         self.auth = api_auth
         self.fixtures = {}
         self.form_context = form_context or {}
@@ -315,19 +520,21 @@ class CCInstances(InstanceInitializationFactory):
         if 'casedb' in ref:
             print "Instance, ", instance.getClass()
             print "Vars" , self.vars
-            return CaseInstanceTreeElement(
+            casedb = CaseInstanceTreeElement(
                 instance.getBase(),
-                CaseDatabase(
+                SQLiteCaseDatabase(
                     self.vars.get('host'),
                     self.vars['domain'],
                     self.auth,
                     self.vars.get("additional_filters", {}),
                     self.vars.get("preload_cases", False),
                     self.form_context,
-                    self.vars["user_id"]
+                    self.vars['user_id'],
                 ),
                 False
             )
+            print "casedb: ", casedb
+            return casedb
         elif 'fixture' in ref:
             fixture_id = ref.split('/')[-1]
             user_id = self.vars['user_id']
@@ -414,6 +621,56 @@ def filter_cases(filter_expr, api_auth, session_data=None, form_context=None):
         return {'cases': filter(lambda x: x, case_list.split(","))}
     except (XPathException, XPathSyntaxException), e:
         raise TouchcareInvalidXPath('Error querying cases with xpath %s: %s' % (filter_expr, str(e)))
+
+
+def load_cases(api_auth, session_data=None, form_context=None):
+    session_data = session_data or {}
+    form_context = form_context or {}
+    modified_xpath = "join(',', instance('casedb')/casedb/case/@case_id)"
+
+    # whenever we do a filter case operation we need to load all
+    # the cases, so force this unless manually specified
+    if 'preload_cases' not in session_data:
+        session_data['preload_cases'] = True
+
+    print "Session Data, ", session_data
+
+    ccInstances = CCInstances(session_data, api_auth, form_context)
+    caseInstance = ExternalDataInstance("jr://instance/casedb", "casedb")
+
+    print "ccInstanes: ", ccInstances
+
+
+    #try:
+    caseInstance.initialize(ccInstances, "casedb")
+    #except (HTTPError, URLError), e:
+    #    raise TouchFormsUnauthorized('Unable to connect to HQ: %s' % str(e))
+
+    print "caseInstance: ", caseInstance
+
+    instances = to_hashtable({"casedb": caseInstance})
+
+    # load any additional instances needed
+    for extra_instance_config in session_data.get('extra_instances', []):
+        data_instance = ExternalDataInstance(extra_instance_config['src'], extra_instance_config['id'])
+        print "initializing data_instance..."
+        data_instance.initialize(ccInstances, extra_instance_config['id'])
+        instances[extra_instance_config['id']] = data_instance
+
+    try:
+        print "case list to string"
+        print "modified xpath, ", modified_xpath
+        print "instances: ", instances
+        print "parse xpath: ", XPathParseTool.parseXPath(modified_xpath)
+        print "eval: ", EvaluationContext(None, instances)
+        print "evaluate: ", XPathParseTool.parseXPath(modified_xpath).eval(
+                EvaluationContext(None, instances))
+        case_list = XPathFuncExpr.toString(
+            XPathParseTool.parseXPath(modified_xpath).eval(
+                EvaluationContext(None, instances)))
+        return {'cases': filter(lambda x: x, case_list.split(","))}
+    except (XPathException, XPathSyntaxException), e:
+        raise TouchcareInvalidXPath('Error querying cases with xpath %s' % (str(e)))
 
 
 class Actions:

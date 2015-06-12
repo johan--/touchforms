@@ -68,16 +68,11 @@ def sqlite_get_connection(database):
     try:
         # try to connect regularly
 
-        print "Trying to get connection.:"
-
         conn = zxJDBC.connectx("org.sqlite.javax.SQLiteConnectionPoolDataSource", **params)
-
-        print "Connection gotten on first try: " + str(conn)
 
     except:
         # else fall back to this workaround (we expect to do this)
 
-        print "Except trying to get connection.:"
         try:
             jarloader = classPathHacker.classPathHacker()
             a = jarloader.addFile(settings.SQLITE_JDBC_JAR)
@@ -85,7 +80,6 @@ def sqlite_get_connection(database):
         except zxJDBC.DatabaseError, msg:
             print msg
 
-        print "Connection gotten on second try"
 
     return conn
 
