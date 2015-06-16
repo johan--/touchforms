@@ -25,8 +25,10 @@ from org.javarosa.core.model.condition import EvaluationContext
 from org.javarosa.core.model.instance import ExternalDataInstance
 from org.commcare.api.persistence import UserDatabaseHelper
 
-from org.kxml2.io import KXmlParser
+from java.util import Hashtable
 
+from org.kxml2.io import KXmlParser
+import org.python.core.PyList as PyList
 from util import to_vect, to_jdate, to_hashtable, to_input_stream, query_factory
 from xcp import TouchFormsUnauthorized, TouchcareInvalidXPath
 from persistence import sqlite_get_connection
@@ -60,30 +62,6 @@ def query_case(q, case_id):
         return None
 
 
-def case_from_json(data):
-    c = Case()
-    c.setCaseId(data['case_id'])
-    c.setTypeId(data['properties']['case_type'])
-    c.setName(data['properties']['case_name'])
-    c.setClosed(data['closed'])
-    if data['properties']['date_opened']:
-        c.setDateOpened(to_jdate(datetime.strptime(data['properties']['date_opened'], '%Y-%m-%dT%H:%M:%S'))) # 'Z' in fmt string omitted due to jython bug
-    owner_id = data['properties']['owner_id'] or data['user_id'] or ""
-    c.setUserId(owner_id) # according to clayton "there is no user_id, only owner_id"
-
-    for k, v in data['properties'].iteritems():
-        if v is not None and k not in ['case_name', 'case_type', 'date_opened']:
-            c.setProperty(k, v)
-
-    for k, v in data['indices'].iteritems():
-        c.setIndex(k, v['case_type'], v['case_id'])
-
-    for k, v in data['attachments'].iteritems():
-        c.updateAttachment(k, v['url'])
-
-    return c
-
-
 def query_ledger_for_case(q, case_id):
     query_string = urllib.urlencode({'case_id': case_id})
     query_url = '%s?%s' % (settings.LEDGER_API_URL, query_string)
@@ -100,19 +78,15 @@ def ledger_from_json(data):
 
 class StaticIterator(IStorageIterator):
     def __init__(self, ids):
-        print "ids: ", ids
-        print "id0: ", ids[0]
         self.ids = ids
         self.i = 0
 
     def hasMore(self):
-        print "Has more"
         return self.i < len(self.ids)
 
     def nextID(self):
         id = self.ids[self.i]
         self.i += 1
-        print "returning next id: ", id
         return id
 
 
@@ -160,7 +134,9 @@ class TouchformsStorageUtility(IStorageUtilityIndexed):
         return self._objects
 
     def put_object(self, object):
+        print "SQLite putting object: ", object
         object_id = self.get_object_id(object)
+        print "SQLite putting object id: ", object_id
         self._objects[object_id] = object
 
     def read(self, record_id):
@@ -265,6 +241,44 @@ class CaseDatabase(TouchformsStorageUtility):
         return to_vect(id_map[c.getCaseId()] for c in cases)
 
 
+def case_from_json(data):
+    print "Data, ", data
+    c = Case()
+    c.setCaseId(data['case_id'])
+    c.setTypeId(data['properties']['case_type'])
+    c.setName(data['properties']['case_name'])
+    c.setClosed(data['closed'])
+    if data['properties']['date_opened']:
+        c.setDateOpened(to_jdate(datetime.strptime(data['properties']['date_opened'], '%Y-%m-%dT%H:%M:%S'))) # 'Z' in fmt string omitted due to jython bug
+    owner_id = data['properties']['owner_id'] or data['user_id'] or ""
+    c.setUserId(owner_id) # according to clayton "there is no user_id, only owner_id"
+
+    for k, v in data['properties'].iteritems():
+        if v is not None and v != "" and k not in ['case_name', 'case_type', 'date_opened']:
+            c.setProperty(k, v)
+
+    #for k, v in data['indices'].iteritems():
+    #    c.setIndex(k, v['case_type'], v['case_id'])
+
+    #for k, v in data['attachments'].iteritems():
+    #    c.updateAttachment(k, v['url'])
+
+    return c
+
+def HashtableToDict(hashtable_string, c):
+    ret = {}
+    hashtable_string = hashtable_string[1:-1]
+    string_array = hashtable_string.split(',')
+    for s in string_array:
+        index = s.index('=')
+        k = s[0:index]
+        v = s[index:]
+        if v is not None and k not in ['case_name', 'case_type', 'date_opened']:
+            c.setProperty(k, v)
+            print "Adding property: ", k, " : ", v
+    return ret
+
+
 class SQLiteCaseDatabase(TouchformsStorageUtility):
     # for now only do this for cases
     def __init__(self, host, domain, auth, additional_filters=None, preload=False, form_context=None, user_id=None):
@@ -275,8 +289,10 @@ class SQLiteCaseDatabase(TouchformsStorageUtility):
         conn = sqlite_get_connection(self.database_name)
         cursor = conn.cursor()
 
-        createcasedbstring = UserDatabaseHelper.createCaseDBString()
-        dropcasedbstring = "DROP TABLE IF EXISTS 'TFCase';"
+        createcasedbstring = "CREATE TABLE TFCase (commcare_sql_id INTEGER PRIMARY KEY," \
+                           "case_id,case_type,case_status,commcare_sql_record BLOB, user_id," \
+                           "date_modified, closed, attachments BLOB, indices BLOB, case_name);"
+        dropcasedbstring = "DROP TABLE TFCase"
         try:
             cursor.execute(dropcasedbstring)
             cursor.execute(createcasedbstring)
@@ -295,7 +311,6 @@ class SQLiteCaseDatabase(TouchformsStorageUtility):
         case_list = json.loads(query_cases(self.query_func, criteria=self.additional_filters))
         print case_list
         for c in case_list:
-            print "c, ", c
             self.insert_case(case_from_json(c))
 
     def insert_case(self, case):
@@ -305,10 +320,13 @@ class SQLiteCaseDatabase(TouchformsStorageUtility):
 
         cursor = conn.cursor()
 
-        ins_sql = "INSERT INTO TFCase (case_id, case_type, case_status, commcare_sql_record) " \
-                      "VALUES (?, ?, ?, ?)"
+        ins_sql = "INSERT INTO TFCase (case_id, case_type, case_status, commcare_sql_record," \
+                  "user_id, date_modified, closed, attachments, indices, case_name) " \
+                      "VALUES (?, ?, ?, ? , ?, ?, ?, ?, ?, ?)"
         ins_params = [case.getCaseId(), case.getMetaData(Case.INDEX_CASE_TYPE),
-                      case.getMetaData(Case.INDEX_CASE_STATUS), case.getProperties().toString()]
+                      case.getMetaData(Case.INDEX_CASE_STATUS), case.getProperties().toString(),
+                      case.getUserId(), case.getLastModified(), case.isClosed(),
+                      case.getAttachments(), case.getIndices(), case.getName()]
 
         cursor.execute(ins_sql, ins_params)
         cursor.close()
@@ -320,16 +338,18 @@ class SQLiteCaseDatabase(TouchformsStorageUtility):
         #todo this is terrible
         c.setCaseId(row[1])
         c.setTypeId(row[2])
-        c.setName(data['properties']['case_name'])
-        c.setClosed(data['closed'])
+        properties = row[4]
+        attachments = row[8]
+        indices = row[9]
+        c.setName(row[10])
+        owner_id = row[5]
+        c.setUserId(owner_id) # according to clayton "there is no user_id, only owner_id"
+        HashtableToDict(properties, c)
+        c.setClosed(row[7])
+        return c
+
         if data['properties']['date_opened']:
             c.setDateOpened(to_jdate(datetime.strptime(data['properties']['date_opened'], '%Y-%m-%dT%H:%M:%S'))) # 'Z' in fmt string omitted due to jython bug
-        owner_id = data['properties']['owner_id'] or data['user_id'] or ""
-        c.setUserId(owner_id) # according to clayton "there is no user_id, only owner_id"
-
-        for k, v in data['properties'].iteritems():
-            if v is not None and k not in ['case_name', 'case_type', 'date_opened']:
-                c.setProperty(k, v)
 
         for k, v in data['indices'].iteritems():
             c.setIndex(k, v['case_type'], v['case_id'])
@@ -337,11 +357,8 @@ class SQLiteCaseDatabase(TouchformsStorageUtility):
         for k, v in data['attachments'].iteritems():
             c.updateAttachment(k, v['url'])
 
-        return c
-
-
     def get_all_cases(self):
-        print "Getting all cases"
+        print "SQlite Getting all cases"
 
         self.database_name = '%s-casedb.db' % self.user_id
         conn = sqlite_get_connection(self.database_name)
@@ -364,7 +381,7 @@ class SQLiteCaseDatabase(TouchformsStorageUtility):
         return cases
 
     def get_case(self, case_id):
-        print "Getting a case, ", case_id
+        print "SQlite Getting a case, ", case_id
         self.database_name = '%s-casedb.db' % self.user_id
         conn = sqlite_get_connection(self.database_name)
 
@@ -388,19 +405,20 @@ class SQLiteCaseDatabase(TouchformsStorageUtility):
         print "SQLite get object ids"
 
         self.database_name = '%s-casedb.db' % self.user_id
+
+        print "DBname: ", self.database_name
+
         conn = sqlite_get_connection(self.database_name)
 
         cursor = conn.cursor()
 
-        ins_sql = "SELECT (commcare_sql_id) FROM TFCase"
+        ins_sql = "SELECT (case_id) FROM TFCase"
 
         cursor.execute(ins_sql)
-
         results = []
 
         for row in cursor.fetchall():
-            #print row
-            results.append(dict(zip(['commcare_sql_id'], row)))
+            results.append(row[0].encode('ascii','ignore'))
 
         cursor.close()
         conn.commit()
@@ -409,7 +427,7 @@ class SQLiteCaseDatabase(TouchformsStorageUtility):
         return results
 
     def get_object_id(self, case):
-        print "get object id sqlite case", case
+        print "SQlite get object id sqlite case", case
         return case.getCaseId()
 
     def load_all_objects(self):
@@ -431,8 +449,8 @@ class SQLiteCaseDatabase(TouchformsStorageUtility):
     def iterate(self):
         #raise Throwable("Fail Here")
         results = self.get_object_ids()
-        ret = ([d['commcare_sql_id'] for d in results])
-        return StaticIterator(ret)
+        print "SQlite Iterate results: ", results
+        return StaticIterator(results)
 
     def read(self, record_id):
         logger.debug('sqlite read record %s' % record_id)
@@ -450,9 +468,6 @@ class SQLiteCaseDatabase(TouchformsStorageUtility):
             cursor.execute(ins_sql, ins_params)
 
             row = cursor.fetchone()
-
-            print "row, ", row
-
             object_id = row[0]
             print "Returning id, ", object_id
         except KeyError:
@@ -623,32 +638,31 @@ def filter_cases(filter_expr, api_auth, session_data=None, form_context=None):
         raise TouchcareInvalidXPath('Error querying cases with xpath %s: %s' % (filter_expr, str(e)))
 
 
-def load_cases(api_auth, session_data=None, form_context=None):
+def load_cases(filter_expr, api_auth, session_data=None, form_context=None):
     session_data = session_data or {}
     form_context = form_context or {}
-    modified_xpath = "join(',', instance('casedb')/casedb/case/@case_id)"
+    modified_xpath = "join(',', instance('casedb')/casedb/case%(filters)s/@case_id)" % \
+        {"filters": filter_expr}
 
     # whenever we do a filter case operation we need to load all
     # the cases, so force this unless manually specified
     if 'preload_cases' not in session_data:
         session_data['preload_cases'] = True
 
-    print "Session Data, ", session_data
-
     ccInstances = CCInstances(session_data, api_auth, form_context)
     caseInstance = ExternalDataInstance("jr://instance/casedb", "casedb")
-
-    print "ccInstanes: ", ccInstances
-
-
-    #try:
-    caseInstance.initialize(ccInstances, "casedb")
-    #except (HTTPError, URLError), e:
-    #    raise TouchFormsUnauthorized('Unable to connect to HQ: %s' % str(e))
+    caseInstance.setName("mycasedb");
 
     print "caseInstance: ", caseInstance
 
+    try:
+        caseInstance.initialize(ccInstances, "casedb")
+    except (HTTPError, URLError), e:
+        raise TouchFormsUnauthorized('Unable to connect to HQ: %s' % str(e))
+
+    print "caseInstance2: ", caseInstance
     instances = to_hashtable({"casedb": caseInstance})
+    print "instances: ", instances
 
     # load any additional instances needed
     for extra_instance_config in session_data.get('extra_instances', []):
@@ -658,16 +672,13 @@ def load_cases(api_auth, session_data=None, form_context=None):
         instances[extra_instance_config['id']] = data_instance
 
     try:
-        print "case list to string"
-        print "modified xpath, ", modified_xpath
-        print "instances: ", instances
-        print "parse xpath: ", XPathParseTool.parseXPath(modified_xpath)
-        print "eval: ", EvaluationContext(None, instances)
-        print "evaluate: ", XPathParseTool.parseXPath(modified_xpath).eval(
-                EvaluationContext(None, instances))
+        print "modified_xpath: ", modified_xpath
+        print "parsed xpath: ", XPathParseTool.parseXPath(modified_xpath)
         case_list = XPathFuncExpr.toString(
             XPathParseTool.parseXPath(modified_xpath).eval(
                 EvaluationContext(None, instances)))
+        print "case_list: ", case_list
+        print "instances: ", instances
         return {'cases': filter(lambda x: x, case_list.split(","))}
     except (XPathException, XPathSyntaxException), e:
         raise TouchcareInvalidXPath('Error querying cases with xpath %s' % (str(e)))

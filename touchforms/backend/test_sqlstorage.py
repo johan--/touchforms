@@ -10,6 +10,8 @@ from xcp import TouchcareInvalidXPath, TouchFormsUnauthorized
 import xformserver
 CUR_DIR = os.path.dirname(__file__)
 from java.lang import Throwable
+from sqlstorage import SQLiteCaseDatabase
+import com.xhaus.jyson.JysonCodec as json
 
 class DummyServer(xformserver.XFormHTTPGateway):
 
@@ -21,8 +23,10 @@ class SQLiteTest(unittest.TestCase):
     def setUp(self):
         with open(os.path.join(CUR_DIR, 'test_files/xforms/xform_simple_cases.xml'), 'r') as f:
             self.xform = f.read()
-        with open(os.path.join(CUR_DIR, 'test_files/restore.json'), 'r') as f:
+        with open(os.path.join(CUR_DIR, 'test_files/restore1.json'), 'r') as f:
             self.restore_payload = f.read()
+        with open(os.path.join(CUR_DIR, 'test_files/restore2.json'), 'r') as f:
+            self.restore_payload_2 = f.read()
 
         self.session_data = {
             'session_name': 'Village Healthe > Simple Form',
@@ -39,26 +43,30 @@ class SQLiteTest(unittest.TestCase):
         }
 
     def test_load_cases(self):
-        filter_expr = "[case_name = 'Test']"
+        self.auth=None
+        self.form_context = {}
+        self.vars = self.session_data
+        sql_storage = SQLiteCaseDatabase(
+                    self.vars.get('host'),
+                    self.vars['domain'],
+                    self.auth,
+                    self.vars.get("additional_filters", {}),
+                    self.vars.get("preload_cases", False),
+                    self.form_context,
+                    self.vars['user_id'],
+        )
+        c = touchcare.case_from_json(json.loads(self.restore_payload))
+        c2 = touchcare.case_from_json(json.loads(self.restore_payload_2))
 
-        def json_restore(derp, criteria):
-            return self.restore_payload
+        sql_storage.write(c)
+        sql_storage.write(c2)
 
-        touchcare.query_cases = json_restore
-        try:
-            resp = touchcare.load_cases(
-                filter_expr,
-                {},
-                self.session_data,
-                None,
-            )
-            print "Resp: ", resp
-            self.assertEqual(len(resp['cases']), 1)
-        except Throwable, e:
-            print "EE, ", e
-            e.printStackTrace()
+        ids_for_value = sql_storage.getIDsForValue("case_name", "Test")
 
+        rec = sql_storage.getRecordForValue("case_id", "de9da558-1957-4c26-8ff1-11a7a90f951d")
 
+        ids = sql_storage.iterate(False)
+        print "IDs: ", ids
 
 if __name__ == '__main__':
     unittest.main()
