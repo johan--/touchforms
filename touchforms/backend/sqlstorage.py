@@ -1,4 +1,4 @@
-from org.javarosa.core.services.storage import IStorageUtilityIndexed
+from org.javarosa.core.services.storage import IStorageUtilityIndexed, IStorageIterator
 from persistence import sqlite_get_connection
 import settings
 from org.javarosa.core.services.storage import Persistable
@@ -10,7 +10,6 @@ from org.commcare.cases.model import Case
 import com.xhaus.jyson.JysonCodec as json
 import com.google.gson.Gson as Gson
 import com.google.gson.GsonBuilder as GsonBuilder
-
 
 def execute_func(database_name, exec_sql):
     conn = sqlite_get_connection(database_name)
@@ -46,14 +45,30 @@ def build_insert_statement(table_name, values):
 
     return ret, params
 
+class StaticIterator(IStorageIterator):
+    def __init__(self, ids):
+        self.ids = ids
+        self.i = 0
+
+    def hasMore(self):
+        return self.i < len(self.ids)
+
+    def nextID(self):
+        id = self.ids[self.i]
+        self.i += 1
+        return id
+
 
 class SQLiteCaseDatabase(IStorageUtilityIndexed):
     # for now only do this for cases
-    def __init__(self, host, domain, auth, additional_filters=None, preload=False, form_context=None, user_id=None):
+    def __init__(self, host, domain, auth, restore, additional_filters=None, preload=False,
+                 form_context=None, user_id=None):
         self.user_id = user_id
         self.database_name = '%s-casedb.db' % user_id
         self.drop_table()
         self.create_table()
+        self.restore = restore
+        self.restore()
 
     def write(self, case):
         #if p.getID() != -1:
@@ -102,11 +117,8 @@ class SQLiteCaseDatabase(IStorageUtilityIndexed):
         id = self.getIDsForValue(fieldname, value)[0]
         return self.read(id)
 
-    def iterate(self, include_data):
-        if include_data:
-            sel_sql = "SELECT * FROM TFcase"
-        else:
-            sel_sql = "SELECT commcare_sql_id FROM TFCase"
+    def iterate(self):
+        sel_sql = "SELECT commcare_sql_id FROM TFCase"
         conn = sqlite_get_connection(self.database_name)
         cursor = conn.cursor()
         cursor.execute(sel_sql)
@@ -114,7 +126,7 @@ class SQLiteCaseDatabase(IStorageUtilityIndexed):
         cursor.close()
         conn.commit()
         conn.close()
-        return rows
+        return StaticIterator(rows)
 
     def case_from_row(self, row):
         c = Case()

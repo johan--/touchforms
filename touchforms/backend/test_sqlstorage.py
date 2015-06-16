@@ -10,7 +10,7 @@ from xcp import TouchcareInvalidXPath, TouchFormsUnauthorized
 import xformserver
 CUR_DIR = os.path.dirname(__file__)
 from java.lang import Throwable
-from sqlstorage import SQLiteCaseDatabase
+from touchcare import SQLiteCaseDatabase
 import com.xhaus.jyson.JysonCodec as json
 
 class DummyServer(xformserver.XFormHTTPGateway):
@@ -43,6 +43,7 @@ class SQLiteTest(unittest.TestCase):
         }
 
     def test_load_cases(self):
+
         self.auth=None
         self.form_context = {}
         self.vars = self.session_data
@@ -65,8 +66,11 @@ class SQLiteTest(unittest.TestCase):
 
         rec = sql_storage.getRecordForValue("case_id", "de9da558-1957-4c26-8ff1-11a7a90f951d")
 
-        ids = sql_storage.iterate(False)
+        ids = sql_storage.iterate()
         print "IDs: ", ids
+
+        count = sql_storage.getNumRecords()
+        print "Count: ", count
 
 if __name__ == '__main__':
     unittest.main()

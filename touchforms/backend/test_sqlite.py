@@ -41,7 +41,10 @@ class SQLiteTest(unittest.TestCase):
     def test_load_cases(self):
         filter_expr = "[case_name = 'Test']"
 
+        print "Test Load Cases"
+
         def json_restore(derp, criteria):
+            print "JSON Restore"
             return self.restore_payload
 
         touchcare.query_cases = json_restore

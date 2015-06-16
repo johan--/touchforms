@@ -32,6 +32,210 @@ import org.python.core.PyList as PyList
 from util import to_vect, to_jdate, to_hashtable, to_input_stream, query_factory
 from xcp import TouchFormsUnauthorized, TouchcareInvalidXPath
 from persistence import sqlite_get_connection
+from org.javarosa.core.services.storage import IStorageUtilityIndexed, IStorageIterator
+from persistence import sqlite_get_connection
+import settings
+from org.javarosa.core.services.storage import Persistable
+from org.javarosa.core.services.storage import IMetaData
+from org.commcare.api.util import TableUtil
+import java.util.Iterator
+import java.util.Map
+from org.commcare.cases.model import Case
+import com.xhaus.jyson.JysonCodec as json
+import com.google.gson.Gson as Gson
+import com.google.gson.GsonBuilder as GsonBuilder
+
+def execute_func(database_name, exec_sql):
+    conn = sqlite_get_connection(database_name)
+    cursor = conn.cursor()
+    cursor.execute(exec_sql)
+    cursor.close()
+    conn.commit()
+    conn.close()
+
+def execute_func_params(database_name, exec_sql, exec_params):
+    conn = sqlite_get_connection(database_name)
+    cursor = conn.cursor()
+    cursor.execute(exec_sql, exec_params)
+    cursor.close()
+    conn.commit()
+    conn.close()
+
+def build_insert_statement(table_name, values):
+    start_statement = "INSERT INTO %s " % table_name + " ("
+    end_statement = "("
+    it = values.entrySet().iterator()
+    params = []
+    while it.hasNext():
+        pair = it.next()
+        start_statement += str(pair.getKey()) + ", "
+        end_statement += " ? ,"
+        params.append(pair.getValue())
+
+    start_statement = start_statement[:-2] + ") VALUES "
+    end_statement = end_statement[:-1] + ")"
+
+    ret = start_statement + end_statement
+
+    return ret, params
+
+class StaticIterator(IStorageIterator):
+    def __init__(self, ids):
+        self.ids = ids
+        self.i = 0
+
+    def hasMore(self):
+        return self.i < len(self.ids)
+
+    def nextID(self):
+        id = self.ids[self.i]
+        self.i += 1
+        return id
+
+
+class SQLiteCaseDatabase(IStorageUtilityIndexed):
+    # for now only do this for cases
+    def __init__(self, host, domain, auth, additional_filters=None, preload=False,
+                 form_context=None, user_id=None):
+        self.user_id = user_id
+        self.database_name = '%s-casedb.db' % user_id
+        self.additional_filters = additional_filters or {}
+        self.drop_table()
+        self.create_table()
+        self.query_func = query_factory(host, domain, auth)
+        #self.restore()
+
+    def restore(self):
+        case_list = json.loads(query_cases(self.query_func, criteria=self.additional_filters))
+        for c in case_list:
+            self.write(case_from_json(c))
+
+    def write(self, case):
+        #if p.getID() != -1:
+        #    self.update(p.getID(), p)
+        #    return
+
+        ins_sql = "INSERT INTO TFCase (case_id, case_type, case_status, commcare_sql_record," \
+                  "user_id, date_modified, closed, attachments, indices, case_name) " \
+                      "VALUES (?, ?, ?, ? , ?, ?, ?, ?, ?, ?)"
+
+        builder = GsonBuilder()
+        gson = builder.create()
+
+        ins_params = [case.getCaseId(), case.getMetaData(Case.INDEX_CASE_TYPE),
+                      case.getMetaData(Case.INDEX_CASE_STATUS), gson.toJson(case.getProperties()),
+                      case.getUserId(), case.getLastModified(), case.isClosed(),
+                      gson.toJson(case.getAttachments()), gson.toJson(case.getIndices()), case.getName()]
+        execute_func_params(self.database_name, ins_sql, ins_params)
+
+    def read(self, id):
+        sel_sql = "SELECT * FROM TFCase WHERE commcare_sql_id = ?"
+        sel_params = [id]
+        conn = sqlite_get_connection(self.database_name)
+        cursor = conn.cursor()
+        cursor.execute(sel_sql, sel_params)
+        row = cursor.fetchone()
+        if row is not None:
+            case = self.case_from_row(row)
+        else:
+            case = None
+
+        cursor.close()
+
+        conn.commit()
+        conn.close()
+        return case
+
+    def getIDsForValue(self, fieldname, value):
+        sel_sql = "SELECT case_id FROM TFCase WHERE %s = ?" % fieldname
+        sel_params = [value]
+        conn = sqlite_get_connection(self.database_name)
+        cursor = conn.cursor()
+        cursor.execute(sel_sql, sel_params)
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.commit()
+        conn.close()
+        return rows
+
+    def getNumRecords(self):
+        conn = sqlite_get_connection(self.database_name)
+        sel_sql = "SELECT * FROM TFCase"
+        cursor = conn.cursor()
+        cursor.execute(sel_sql)
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.commit()
+        conn.close()
+        return len(rows)
+
+    def getRecordForValue(self, fieldname, value):
+        id = self.getIDsForValue(fieldname, value)[0]
+        return self.read(id)
+
+    def iterate(self):
+        sel_sql = "SELECT commcare_sql_id FROM TFCase"
+        conn = sqlite_get_connection(self.database_name)
+        cursor = conn.cursor()
+        cursor.execute(sel_sql)
+        list = []
+        rows = cursor.fetchall()
+        for row in rows:
+            list.append(row[0])
+        cursor.close()
+        conn.commit()
+        conn.close()
+        return StaticIterator(list)
+
+    def case_from_row(self, row):
+        c = Case()
+        builder = GsonBuilder()
+        gson = builder.create()
+        #todo this is terrible
+        c.setCaseId(row[1])
+        c.setTypeId(row[2])
+        properties = gson.fromJson(row[4], java.util.Hashtable)
+        attachments = gson.fromJson(row[8], java.util.Vector)
+        indices = gson.fromJson(row[9], java.util.Vector)
+        c.setName(row[10])
+        owner_id = row[5]
+        c.setUserId(owner_id)
+        c.setClosed(row[7])
+
+        enumKey = properties.keys()
+
+        while enumKey.hasMoreElements():
+            key = enumKey.nextElement()
+            val = properties.get(key)
+            c.setProperty(key, val)
+
+        iterator = indices.iterator()
+
+        while iterator.hasNext():
+            val = iterator.next()
+            c.setIndex(key, val['case_type'], val['case_id'])
+
+        iterator = attachments.iterator()
+
+        while iterator.hasNext():
+            attachment = iterator.next()
+            c.setIndex(key, attachment['url'])
+
+        return c
+
+    def create_table(self):
+        create_string = "CREATE TABLE TFCase (commcare_sql_id INTEGER PRIMARY KEY," \
+                           "case_id,case_type,case_status,commcare_sql_record BLOB, user_id," \
+                           "date_modified, closed, attachments BLOB, indices BLOB, case_name);"
+        execute_func(self.database_name, create_string)
+
+    def drop_table(self):
+        try:
+            drop_string = "DROP TABLE TFCase"
+            execute_func(self.database_name, drop_string)
+            print "Dropped table"
+        except:
+            print "Table does not exist"
 
 logger = logging.getLogger('formplayer.touchcare')
 
@@ -51,7 +255,6 @@ def query_cases(q, criteria=None):
     ret = [case_from_json(cj) for cj in q(query_url)]
     print ret
     return ret
-
 
 
 def query_case(q, case_id):
@@ -78,6 +281,7 @@ def ledger_from_json(data):
 
 class StaticIterator(IStorageIterator):
     def __init__(self, ids):
+        print "StaticIterator settings ids: ", ids
         self.ids = ids
         self.i = 0
 
@@ -242,7 +446,6 @@ class CaseDatabase(TouchformsStorageUtility):
 
 
 def case_from_json(data):
-    print "Data, ", data
     c = Case()
     c.setCaseId(data['case_id'])
     c.setTypeId(data['properties']['case_type'])
@@ -264,225 +467,6 @@ def case_from_json(data):
     #    c.updateAttachment(k, v['url'])
 
     return c
-
-def HashtableToDict(hashtable_string, c):
-    ret = {}
-    hashtable_string = hashtable_string[1:-1]
-    string_array = hashtable_string.split(',')
-    for s in string_array:
-        index = s.index('=')
-        k = s[0:index]
-        v = s[index:]
-        if v is not None and k not in ['case_name', 'case_type', 'date_opened']:
-            c.setProperty(k, v)
-            print "Adding property: ", k, " : ", v
-    return ret
-
-
-class SQLiteCaseDatabase(TouchformsStorageUtility):
-    # for now only do this for cases
-    def __init__(self, host, domain, auth, additional_filters=None, preload=False, form_context=None, user_id=None):
-
-        self.user_id = user_id
-        self.database_name = '%s-casedb.db' % user_id
-
-        conn = sqlite_get_connection(self.database_name)
-        cursor = conn.cursor()
-
-        createcasedbstring = "CREATE TABLE TFCase (commcare_sql_id INTEGER PRIMARY KEY," \
-                           "case_id,case_type,case_status,commcare_sql_record BLOB, user_id," \
-                           "date_modified, closed, attachments BLOB, indices BLOB, case_name);"
-        dropcasedbstring = "DROP TABLE TFCase"
-        try:
-            cursor.execute(dropcasedbstring)
-            cursor.execute(createcasedbstring)
-        except Exception, e:
-            print "Exception, " , e
-            # do nothing
-
-        cursor.close()
-        conn.commit()
-        conn.close()
-
-        super(SQLiteCaseDatabase, self).__init__(host, domain, auth, additional_filters, preload, form_context)
-        self.restore()
-
-    def restore(self):
-        case_list = json.loads(query_cases(self.query_func, criteria=self.additional_filters))
-        print case_list
-        for c in case_list:
-            self.insert_case(case_from_json(c))
-
-    def insert_case(self, case):
-
-        self.database_name = '%s-casedb.db' % self.user_id
-        conn = sqlite_get_connection(self.database_name)
-
-        cursor = conn.cursor()
-
-        ins_sql = "INSERT INTO TFCase (case_id, case_type, case_status, commcare_sql_record," \
-                  "user_id, date_modified, closed, attachments, indices, case_name) " \
-                      "VALUES (?, ?, ?, ? , ?, ?, ?, ?, ?, ?)"
-        ins_params = [case.getCaseId(), case.getMetaData(Case.INDEX_CASE_TYPE),
-                      case.getMetaData(Case.INDEX_CASE_STATUS), case.getProperties().toString(),
-                      case.getUserId(), case.getLastModified(), case.isClosed(),
-                      case.getAttachments(), case.getIndices(), case.getName()]
-
-        cursor.execute(ins_sql, ins_params)
-        cursor.close()
-        conn.commit()
-        conn.close()
-
-    def row_to_case(self, row):
-        c = Case()
-        #todo this is terrible
-        c.setCaseId(row[1])
-        c.setTypeId(row[2])
-        properties = row[4]
-        attachments = row[8]
-        indices = row[9]
-        c.setName(row[10])
-        owner_id = row[5]
-        c.setUserId(owner_id) # according to clayton "there is no user_id, only owner_id"
-        HashtableToDict(properties, c)
-        c.setClosed(row[7])
-        return c
-
-        if data['properties']['date_opened']:
-            c.setDateOpened(to_jdate(datetime.strptime(data['properties']['date_opened'], '%Y-%m-%dT%H:%M:%S'))) # 'Z' in fmt string omitted due to jython bug
-
-        for k, v in data['indices'].iteritems():
-            c.setIndex(k, v['case_type'], v['case_id'])
-
-        for k, v in data['attachments'].iteritems():
-            c.updateAttachment(k, v['url'])
-
-    def get_all_cases(self):
-        print "SQlite Getting all cases"
-
-        self.database_name = '%s-casedb.db' % self.user_id
-        conn = sqlite_get_connection(self.database_name)
-
-        cursor = conn.cursor()
-
-        sel_sql = "SELECT * FROM TFCase"
-        cursor.execute(sel_sql)
-
-        cases = []
-
-        for row in cursor:
-            case = self.row_to_case(row)
-            cases.append(case)
-
-        cursor.close()
-        conn.commit()
-        conn.close()
-
-        return cases
-
-    def get_case(self, case_id):
-        print "SQlite Getting a case, ", case_id
-        self.database_name = '%s-casedb.db' % self.user_id
-        conn = sqlite_get_connection(self.database_name)
-
-        cursor = conn.cursor()
-
-        sel_sql = "SELECT * FROM TFCase WHERE case_id = ?"
-        sel_params = [case_id]
-        cursor.execute(sel_sql, sel_params)
-
-        row = cursor.fetchone()
-        case = self.row_to_case(row)
-
-        cursor.close()
-        conn.commit()
-        conn.close()
-
-        return case
-
-    def get_object_ids(self):
-
-        print "SQLite get object ids"
-
-        self.database_name = '%s-casedb.db' % self.user_id
-
-        print "DBname: ", self.database_name
-
-        conn = sqlite_get_connection(self.database_name)
-
-        cursor = conn.cursor()
-
-        ins_sql = "SELECT (case_id) FROM TFCase"
-
-        cursor.execute(ins_sql)
-        results = []
-
-        for row in cursor.fetchall():
-            results.append(row[0].encode('ascii','ignore'))
-
-        cursor.close()
-        conn.commit()
-        conn.close()
-
-        return results
-
-    def get_object_id(self, case):
-        print "SQlite get object id sqlite case", case
-        return case.getCaseId()
-
-    def load_all_objects(self):
-        print "SQLiteCaseDatabase load_all_objects"
-        if self.form_context.get('cases', None):
-            cases = map(lambda c: case_from_json(c), self.form_context.get('cases'))
-        else:
-            cases = self.get_all_cases()
-
-        for c in cases:
-            self.put_object(c)
-        # todo: the sorted() call is a hack to try and preserve order between bootstrapping
-        # this with IDs versus full values. Really we should store a _next_id integer and then
-        # update things as they go into self._objects inside the put_object() function.
-        # http://manage.dimagi.com/default.asp?169413
-        self.ids = dict(enumerate(sorted(self._objects.keys())))
-        self.fully_loaded = True
-
-    def iterate(self):
-        #raise Throwable("Fail Here")
-        results = self.get_object_ids()
-        print "SQlite Iterate results: ", results
-        return StaticIterator(results)
-
-    def read(self, record_id):
-        logger.debug('sqlite read record %s' % record_id)
-        print "sqlite Reading record, ", record_id
-        print "ids: ", self.ids
-        try:
-            self.database_name = '%s-casedb.db' % self.user_id
-            conn = sqlite_get_connection(self.database_name)
-
-            cursor = conn.cursor()
-
-            ins_sql = "SELECT case_id FROM TFCase WHERE commcare_sql_id = ?"
-            ins_params = [record_id]
-
-            cursor.execute(ins_sql, ins_params)
-
-            row = cursor.fetchone()
-            object_id = row[0]
-            print "Returning id, ", object_id
-        except KeyError:
-            print "Key error :("
-            return None
-        print "returning: ", self.read_object(object_id)
-        return self.read_object(object_id)
-
-    def fetch_object(self, case_id):
-        print "SQLiteCaseDatabase gfet object ", case_id
-        if ('case-id', case_id) in self.cached_lookups:
-            return self.cached_lookups[('case-id', case_id)][0]
-        return self.get_case(case_id)
-
-
 
 class LedgerDatabase(TouchformsStorageUtility):
     def __init__(self, host, domain, auth, additional_filters, preload):
@@ -526,15 +510,12 @@ class CCInstances(InstanceInitializationFactory):
 
     def generateRoot(self, instance):
         ref = instance.getReference()
+
         def from_bundle(inst):
-            print "From Bundle"
             root = inst.getRoot()
             root.setParent(instance.getBase())
             return root
-        print "Ref, ", ref
         if 'casedb' in ref:
-            print "Instance, ", instance.getClass()
-            print "Vars" , self.vars
             casedb = CaseInstanceTreeElement(
                 instance.getBase(),
                 SQLiteCaseDatabase(
@@ -641,8 +622,7 @@ def filter_cases(filter_expr, api_auth, session_data=None, form_context=None):
 def load_cases(filter_expr, api_auth, session_data=None, form_context=None):
     session_data = session_data or {}
     form_context = form_context or {}
-    modified_xpath = "join(',', instance('casedb')/casedb/case%(filters)s/@case_id)" % \
-        {"filters": filter_expr}
+    modified_xpath = "instance('casedb')/casedb/case[case_name='Abc']/@case_id"
 
     # whenever we do a filter case operation we need to load all
     # the cases, so force this unless manually specified
