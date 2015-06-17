@@ -103,7 +103,7 @@ class SQLiteCaseDatabase(IStorageUtilityIndexed):
         self.drop_table()
         self.create_table()
         self.query_func = query_factory(host, domain, auth)
-        #self.restore()
+        self.restore()
 
     def restore(self):
         case_list = json.loads(query_cases(self.query_func, criteria=self.additional_filters))
@@ -622,7 +622,8 @@ def filter_cases(filter_expr, api_auth, session_data=None, form_context=None):
 def load_cases(filter_expr, api_auth, session_data=None, form_context=None):
     session_data = session_data or {}
     form_context = form_context or {}
-    modified_xpath = "instance('casedb')/casedb/case[case_name='Abc']/@case_id"
+    modified_xpath = "join(',', instance('casedb')/casedb/case%(filters)s/@case_id)" % \
+        {"filters": filter_expr}
 
     # whenever we do a filter case operation we need to load all
     # the cases, so force this unless manually specified
@@ -658,7 +659,7 @@ def load_cases(filter_expr, api_auth, session_data=None, form_context=None):
             XPathParseTool.parseXPath(modified_xpath).eval(
                 EvaluationContext(None, instances)))
         print "case_list: ", case_list
-        print "instances: ", instances
+        print "instances last: ", instances
         return {'cases': filter(lambda x: x, case_list.split(","))}
     except (XPathException, XPathSyntaxException), e:
         raise TouchcareInvalidXPath('Error querying cases with xpath %s' % (str(e)))

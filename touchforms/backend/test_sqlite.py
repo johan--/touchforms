@@ -39,7 +39,8 @@ class SQLiteTest(unittest.TestCase):
         }
 
     def test_load_cases(self):
-        filter_expr = "[case_name = 'Test']"
+        filter_expr_1 = "[case_name = 'Abc']"
+        filter_expr_2 = "[case_name = 'Test']"
 
         print "Test Load Cases"
 
@@ -50,13 +51,24 @@ class SQLiteTest(unittest.TestCase):
         touchcare.query_cases = json_restore
         try:
             resp = touchcare.load_cases(
-                filter_expr,
+                filter_expr_1,
                 {},
                 self.session_data,
                 None,
             )
             print "Resp: ", resp
             self.assertEqual(len(resp['cases']), 1)
+
+            resp2 = touchcare.load_cases(
+                filter_expr_2,
+                {},
+                self.session_data,
+                None,
+            )
+            print "Resp: ", resp2
+            self.assertEqual(len(resp2['cases']), 3)
+
+
         except Throwable, e:
             print "EE, ", e
             e.printStackTrace()
